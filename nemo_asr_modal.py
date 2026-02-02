@@ -30,6 +30,8 @@ image = (
     .pip_install("nemo_toolkit[asr]==2.2.1")
 )
 
+hf_model = modal.Volume.from_name("hf-model-cache", create_if_missing=True)
+
 
 @app.cls(
     image=image,
@@ -37,32 +39,58 @@ image = (
     timeout=600,
     container_idle_timeout=300,
     allow_concurrent_inputs=10,
+    volumes={"/model-cache": hf_model},
 )
 class NeMoASR:
-    model_name: str = "nvidia/parakeet-tdt-0.6b-v2"
+    hf_repo: str = "TrySalient/nemotron-asr-5k-combined-epoch15"
+    model_filename: str = "nemotron-asr-5k-combined-epoch15.nemo"
+    att_context_size: list = [70, 1]
 
     @modal.enter()
     def load_model(self):
         import torch
         import nemo.collections.asr as nemo_asr
         from nemo.collections.asr.parts.utils.streaming_utils import CacheAwareStreamingAudioBuffer
+        from huggingface_hub import hf_hub_download
+        import os
 
         self.device = torch.device("cuda")
 
-        # Load the streaming ASR model
-        self.asr_model = nemo_asr.models.ASRModel.from_pretrained(
-            model_name=self.model_name,
+        # Download model from HuggingFace
+        cache_dir = "/model-cache"
+        model_path = os.path.join(cache_dir, self.model_filename)
+
+        if not os.path.exists(model_path):
+            print(f"Downloading {self.hf_repo}...")
+            downloaded_path = hf_hub_download(
+                repo_id=self.hf_repo,
+                filename=self.model_filename,
+                cache_dir=cache_dir,
+                local_dir=cache_dir,
+            )
+            model_path = downloaded_path
+            hf_model.commit()
+
+        print(f"Loading model from {model_path}...")
+        self.asr_model = nemo_asr.models.ASRModel.restore_from(
+            restore_path=model_path,
             map_location=self.device,
         )
         self.asr_model.eval()
         self.asr_model = self.asr_model.to(self.device)
+
+        # Set attention context size for streaming
+        if hasattr(self.asr_model.encoder, "set_default_att_context_size"):
+            self.asr_model.encoder.set_default_att_context_size(att_context_size=self.att_context_size)
+            print(f"Set att_context_size to {self.att_context_size}")
 
         # Disable CUDA graphs for streaming compatibility
         if hasattr(self.asr_model, 'decoding') and hasattr(self.asr_model.decoding, 'rnnt_decoding_config'):
             self.asr_model.decoding.rnnt_decoding_config.cuda_graph_mode = None
 
         self.streaming_buffer_class = CacheAwareStreamingAudioBuffer
-        print(f"Model {self.model_name} loaded successfully")
+        print(f"Model loaded successfully")
+        print(f"Streaming config: {self.asr_model.encoder.streaming_cfg}")
 
     def _create_streaming_buffer(self):
         return self.streaming_buffer_class(
@@ -118,7 +146,7 @@ class NeMoASR:
 
     @modal.web_endpoint(method="GET")
     def health(self):
-        return {"status": "healthy", "model": self.model_name}
+        return {"status": "healthy", "model": self.hf_repo}
 
     @modal.asgi_app()
     def webapp(self):
