@@ -4,7 +4,8 @@ app = modal.App("nemotron-asr-streaming")
 
 image = (
     modal.Image.debian_slim(python_version="3.10")
-    .apt_install("git", "ffmpeg", "libsndfile1")
+    .apt_install("git", "ffmpeg", "libsndfile1", "build-essential")
+    .pip_install("Cython")
     .pip_install(
         "torch==2.5.1",
         "torchaudio==2.5.1",
@@ -28,7 +29,7 @@ image = (
         "websockets",
     )
     .pip_install("nemo_toolkit[asr]==2.2.1")
-    .copy_local_file("speech_to_text_cache_aware_streaming_infer.py", "/root/speech_to_text_cache_aware_streaming_infer.py")
+    .add_local_file("speech_to_text_cache_aware_streaming_infer.py", "/root/speech_to_text_cache_aware_streaming_infer.py")
 )
 
 hf_model = modal.Volume.from_name("hf-model-cache", create_if_missing=True)
@@ -36,12 +37,12 @@ hf_model = modal.Volume.from_name("hf-model-cache", create_if_missing=True)
 
 @app.cls(
     image=image,
-    gpu=modal.gpu.H100(count=1),
+    gpu="H100",
     timeout=600,
-    container_idle_timeout=300,
-    allow_concurrent_inputs=10,
+    scaledown_window=300,
     volumes={"/model-cache": hf_model},
 )
+@modal.concurrent(max_inputs=10)
 class NeMoASR:
     hf_repo: str = "TrySalient/nemotron-asr-5k-combined-epoch15"
     model_filename: str = "nemotron-asr-5k-combined-epoch15.nemo"
@@ -93,7 +94,7 @@ class NeMoASR:
             map_location=self.device,
         )
 
-        # Set att_context_size
+        # Set att_context_size for streaming
         if hasattr(self.asr_model.encoder, "set_default_att_context_size"):
             self.asr_model.encoder.set_default_att_context_size(att_context_size=self.att_context_size)
             print(f"Set att_context_size to {self.att_context_size}")
@@ -110,7 +111,7 @@ class NeMoASR:
 
         print(f"Model loaded. Streaming config: {self.asr_model.encoder.streaming_cfg}")
 
-    @modal.web_endpoint(method="GET")
+    @modal.fastapi_endpoint(method="GET")
     def health(self):
         return {"status": "healthy", "model": self.hf_repo}
 
