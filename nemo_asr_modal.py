@@ -1,6 +1,6 @@
 import modal
 
-app = modal.App("nemo-fastconformer-streaming")
+app = modal.App("nemotron-asr-streaming")
 
 image = (
     modal.Image.debian_slim(python_version="3.10")
